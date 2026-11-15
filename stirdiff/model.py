@@ -180,7 +180,11 @@ class IntegratedModel(nn.Module):
 
 
 def save_checkpoint(path, model, threshold=None):
-    """Save weights together with the configuration and fitted input statistics."""
+    """Save model state and its development-set Youden cutoff, if available.
+
+    A cutoff must be selected on development predictions for these exact
+    weights. The imputer-only warmup checkpoint has no classification cutoff.
+    """
     if threshold is not None and (not np.isfinite(threshold) or not 0 <= threshold <= 1):
         raise ValueError("Threshold must be finite and within [0, 1]")
     path = Path(path)
@@ -191,6 +195,10 @@ def save_checkpoint(path, model, threshold=None):
         "config": model.config(),
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "threshold": threshold,
+        "threshold_selection": None if threshold is None else {
+            "data": "development", "criterion": "youden_j",
+            "decision_rule": "probability >= threshold",
+        },
     }
     try:
         torch.save(payload, temporary)
@@ -210,4 +218,9 @@ def load_checkpoint(path, device="cpu"):
     threshold = saved.get("threshold")
     if threshold is not None and (not np.isfinite(threshold) or not 0 <= threshold <= 1):
         raise ValueError("Invalid saved threshold")
+    selection = saved.get("threshold_selection")
+    if selection is not None and selection != {
+            "data": "development", "criterion": "youden_j",
+            "decision_rule": "probability >= threshold"}:
+        raise ValueError("Checkpoint cutoff must come from development-set Youden J")
     return model, threshold

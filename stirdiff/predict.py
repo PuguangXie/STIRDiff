@@ -69,7 +69,8 @@ def predict_frame(model, frame, input_mode="raw", batch_size=64):
                        "hospital_observationoffset", "scene_observationoffset",
                        "vital_observationoffset", "death") if c in frame]
     out = frame[cols].copy().rename(columns={"death": "true_label"})
-    out["risk_probability"] = restored
+    # Preserve the exact model probabilities when pandas serializes a CSV.
+    out["risk_probability"] = restored.astype(np.float64)
     return out
 
 

@@ -209,8 +209,9 @@ def _risk_validation(model, loader, config, device, input_mode):
             ss.append(batch["scene"][valid].cpu().numpy())
     labels, probabilities, scenes = map(np.concatenate, (ys, ps, ss))
     score = _selection_score(labels, probabilities, scenes, config.selection_scenes)
-    threshold = youden_threshold(labels, probabilities) if len(np.unique(labels)) == 2 else None
-    return score, threshold, {"dev_macro_auroc": score}
+    threshold = youden_threshold(labels, probabilities)
+    return score, threshold, {"dev_macro_auroc": score,
+                              "development_youden_threshold": threshold}
 
 
 def _generator_validation(model, loader, config, bank, device):
@@ -470,6 +471,8 @@ def train(train_frame, dev_frame, output, config=None, generator_config=None,
         "selection_scenes": list(config.selection_scenes),
         "selection_metric": "mean scene AUROC",
         "threshold": threshold,
+        "threshold_source": "development_youden",
+        "threshold_rule": "probability >= threshold",
         "predictor_stage_threshold": predictor_threshold,
         "selection_score": selection_score,
         "training_config": asdict(config),
@@ -486,11 +489,8 @@ def _read_cli(path):
     return read_table(path, input_mode="raw", require_labels=True)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Train STIRDiff in three stages from raw CSVs")
-    parser.add_argument("--train", required=True, type=Path, help="raw training CSV")
-    parser.add_argument("--dev", required=True, type=Path, help="raw development CSV")
-    parser.add_argument("--output", required=True, type=Path)
+def add_training_arguments(parser):
+    """Shared options for a predefined split and five-fold training."""
     parser.add_argument("--device", default="auto")
     parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument("--predictor-epochs", type=int, default=6)
@@ -504,15 +504,28 @@ def main(argv=None):
     parser.add_argument("--patience", type=int, default=2)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--selection-scenes", type=int, nargs="+", default=[1, 2, 3, 5])
-    args = parser.parse_args(argv)
-    config = TrainingConfig(
+    return parser
+
+
+def config_from_args(args):
+    return TrainingConfig(
         warmup_epochs=args.warmup_epochs, predictor_epochs=args.predictor_epochs,
         joint_epochs=args.joint_epochs, batch_size=args.batch_size,
         eval_batch_size=args.eval_batch_size, max_length=args.max_length,
         steps=args.steps, samples=args.samples, seed=args.seed, patience=args.patience,
         selection_scenes=tuple(args.selection_scenes), threads=args.threads,
     )
-    train(_read_cli(args.train), _read_cli(args.dev), args.output, config, device=args.device)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Train STIRDiff in three stages from raw CSVs")
+    parser.add_argument("--train", required=True, type=Path, help="raw training CSV")
+    parser.add_argument("--dev", required=True, type=Path, help="raw development CSV")
+    parser.add_argument("--output", required=True, type=Path)
+    add_training_arguments(parser)
+    args = parser.parse_args(argv)
+    train(_read_cli(args.train), _read_cli(args.dev), args.output,
+          config_from_args(args), device=args.device)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ def main():
         parser.error("output already exists; choose a new directory")
     torch.set_num_threads(args.threads)
     model, threshold = load_checkpoint(args.checkpoint, args.device)
+    if threshold is None:
+        parser.error("checkpoint has no development-set Youden cutoff; use a risk-trained checkpoint")
     frame = read_table(args.input)
     predictions = predict_frame(model, frame, batch_size=args.batch_size)
     def summarize(rows):
@@ -36,7 +38,8 @@ def main():
         "by_scene": {str(int(scene)): summarize(rows)
                      for scene, rows in predictions.groupby("scene", sort=True)},
         "threshold": threshold,
-        "threshold_source": "saved_development_cutoff" if threshold is not None else None,
+        "threshold_source": "development_youden",
+        "threshold_rule": "probability >= threshold",
     }
     output.mkdir(parents=True)
     predictions.to_csv(output / "predictions.csv", index=False)

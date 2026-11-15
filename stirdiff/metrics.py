@@ -21,7 +21,11 @@ def _validated_arrays(labels, probabilities):
 
 
 def youden_threshold(labels, probabilities) -> float:
-    """Choose a binary classification cutoff by maximizing Youden's J."""
+    """Choose a development-set cutoff maximizing sensitivity + specificity - 1.
+
+    Call with development labels/probabilities only, never test data. Ties use
+    the highest eligible observed probability. Positive means p >= threshold.
+    """
     y, p = _validated_arrays(labels, probabilities)
     if len(np.unique(y)) != 2:
         raise ValueError("Youden threshold requires both label classes")
