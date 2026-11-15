@@ -5,5 +5,13 @@
 !/pyproject.toml
 !/stirdiff/
 !/stirdiff/__init__.py
+!/stirdiff/data.py
+!/stirdiff/model.py
+!/stirdiff/normalization.py
+!/stirdiff/masking.py
+!/stirdiff/train.py
+!/stirdiff/predict.py
+!/stirdiff/test.py
+!/stirdiff/metrics.py
 !/stirdiff/imputer.py
 !/stirdiff/predictor.py

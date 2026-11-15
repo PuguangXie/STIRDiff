@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stirdiff"
-version = "0.1.0"
-description = "Model architecture code accompanying the STIRDiff manuscript."
+version = "0.2.0"
+description = "Code accompanying the STIRDiff manuscript."
 requires-python = ">=3.10"
-dependencies = ["torch>=2.0"]
+dependencies = ["torch>=2.0", "numpy>=1.23", "pandas>=1.5", "scikit-learn>=1.2"]
 
 [tool.setuptools.packages.find]
 include = ["stirdiff"]
