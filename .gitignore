@@ -1,0 +1,9 @@
+# Only the architecture source and minimal package documentation are publishable.
+*
+!/.gitignore
+!/README.md
+!/pyproject.toml
+!/stirdiff/
+!/stirdiff/__init__.py
+!/stirdiff/imputer.py
+!/stirdiff/predictor.py

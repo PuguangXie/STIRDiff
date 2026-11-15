@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stirdiff"
+version = "0.1.0"
+description = "Model architecture code accompanying the STIRDiff manuscript."
+requires-python = ">=3.10"
+dependencies = ["torch>=2.0"]
+
+[tool.setuptools.packages.find]
+include = ["stirdiff"]
