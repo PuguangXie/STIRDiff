@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping
+from typing import Any, Mapping
 
 import torch
 from torch import Tensor, nn
@@ -21,6 +21,7 @@ class ImputerConfig:
     feedforward_dim: int = 128
     dropout: float = 0.1
     diffusion_steps: int = 100
+    x0_huber_weight: float = 0.05
 
 
 def _sinusoidal_embedding(steps: Tensor, dim: int) -> Tensor:
@@ -104,6 +105,8 @@ class AxialDiffusionImputer(nn.Module):
             raise ValueError("diffusion_steps must be at least 2")
         if not (0.0 <= float(config.dropout) < 1.0):
             raise ValueError("dropout must satisfy 0 <= dropout < 1")
+        if float(config.x0_huber_weight) < 0.0:
+            raise ValueError("x0_huber_weight must be nonnegative")
 
         # Cosine schedule rescaled to exact zero terminal SNR.
         d = int(config.diffusion_steps)
@@ -164,6 +167,35 @@ class AxialDiffusionImputer(nn.Module):
         if t > 1 and bool(((~valid[:, :-1]) & valid[:, 1:]).any()):
             raise ValueError("valid must be contiguous and right padded")
         return valid
+
+    def _validate_masks(
+        self,
+        batch: Mapping[str, Tensor],
+        cond_mask: Tensor,
+        target_mask: Tensor | None = None,
+        *,
+        allow_default_padding_mask: bool = False,
+    ) -> tuple[Tensor, Tensor | None, Tensor, Tensor]:
+        b, t, _ = batch["vitals"].shape
+        valid = self._valid_mask(batch, b, t)
+        original = self._binary_mask(batch["vital_mask"], "vital_mask", (b, t, self.N_VARIABLES))
+        cond = self._binary_mask(cond_mask, "cond_mask", (b, t, self.N_VARIABLES))
+        if allow_default_padding_mask:
+            cond = cond & valid.unsqueeze(-1)
+        elif bool((cond & ~valid.unsqueeze(-1)).any()):
+            raise ValueError("cond_mask cannot include padded positions")
+        if bool((cond & ~original).any()):
+            raise ValueError("cond_mask cannot include originally missing cells")
+        target = None
+        if target_mask is not None:
+            target = self._binary_mask(target_mask, "target_mask", (b, t, self.N_VARIABLES))
+            if bool((target & ~valid.unsqueeze(-1)).any()):
+                raise ValueError("target_mask cannot include padded positions")
+            if bool((target & ~original).any()):
+                raise ValueError("target_mask cannot include originally missing cells")
+            if bool((target & cond).any()):
+                raise ValueError("target_mask and cond_mask must be disjoint")
+        return cond, target, original, valid
 
     def _check_batch(self, batch: Mapping[str, Tensor], noisy: Tensor | None = None) -> tuple[int, int, torch.device]:
         required = ("vitals", "scene", "age", "gender", "time", "valid")
@@ -228,6 +260,98 @@ class AxialDiffusionImputer(nn.Module):
         x0 = sa * noisy - so * prediction
         eps = so * noisy + sa * prediction
         return x0, eps
+
+    def loss(
+        self,
+        batch: Mapping[str, Tensor],
+        cond_mask: Tensor,
+        target_mask: Tensor,
+        loss_weights: Tensor | None = None,
+    ) -> tuple[Tensor, dict[str, Any]]:
+        """Compute scene-balanced masked v-prediction MSE and x0 SmoothL1."""
+        b, t, device = self._check_batch(batch)
+        vitals = batch["vitals"]
+        dtype = vitals.dtype if vitals.is_floating_point() else torch.float32
+        vitals = vitals.to(dtype)
+        if "vital_mask" not in batch:
+            raise KeyError("loss requires original batch['vital_mask'] for target validation")
+        cond_mask, target_mask, original, valid_2d = self._validate_masks(
+            batch, cond_mask, target_mask
+        )
+        assert target_mask is not None
+        support = target_mask & valid_2d.unsqueeze(-1)
+        if loss_weights is None and "loss_weight" in batch:
+            loss_weights = batch["loss_weight"]
+        if loss_weights is None:
+            weights = torch.ones_like(vitals)
+        else:
+            if tuple(loss_weights.shape) != (b, t, self.N_VARIABLES):
+                raise ValueError("loss_weights must have shape [B,T,6]")
+            weights = loss_weights.to(device=device, dtype=dtype)
+            if not torch.isfinite(weights[support]).all() or bool((weights[support] <= 0).any()):
+                raise ValueError("loss weights on target cells must be finite and positive")
+            weights = torch.where(support, weights, torch.ones_like(weights))
+        count = int(support.sum().item())
+        if count == 0:
+            zero = sum((parameter.sum() for parameter in self.parameters()), vitals.new_zeros(())) * 0.0
+            return zero, {"target_count": 0, "support_count": 0, "groups": 0, "loss": 0.0, "finite": True}
+
+        step = torch.randint(1, self.config.diffusion_steps + 1, (b,), device=device)
+        sa, so = self._step_coefficients(step, dtype)
+        sa3, so3 = sa[:, None, None], so[:, None, None]
+        original3 = original.to(device=device)
+        latent_clean = torch.where(original3, vitals, torch.randn_like(vitals))
+        noise = torch.randn_like(latent_clean)
+        noisy = sa3 * latent_clean + so3 * noise
+        denoise_input = torch.where(cond_mask, vitals, noisy)
+        prediction = self.denoise(denoise_input, cond_mask, batch, step)
+        target = sa3 * noise - so3 * latent_clean
+        per_cell = (prediction - target).square()
+
+        scene = batch["scene"].long()
+        group_losses: list[Tensor] = []
+        group_support = 0
+        for scene_id in range(1, 6):
+            for variable in range(self.N_VARIABLES):
+                group = support[..., variable] & (scene == scene_id)
+                if group.any():
+                    group_weights = weights[..., variable][group]
+                    group_losses.append(
+                        (per_cell[..., variable][group] * group_weights).sum()
+                        / group_weights.sum()
+                    )
+                    group_support += 1
+        if not group_losses:
+            raise RuntimeError("target support unexpectedly vanished")
+        diffusion_loss = torch.stack(group_losses).mean()
+
+        x0, _ = self._predict_x0_eps(denoise_input, prediction, step)
+        aux_groups: list[Tensor] = []
+        for scene_id in range(1, 6):
+            for variable in range(self.N_VARIABLES):
+                group = support[..., variable] & (scene == scene_id)
+                if group.any():
+                    group_weights = weights[..., variable][group]
+                    aux_values = F.smooth_l1_loss(
+                        x0[..., variable][group], latent_clean[..., variable][group], reduction="none"
+                    )
+                    aux_groups.append(
+                        (aux_values * group_weights).sum() / group_weights.sum()
+                    )
+        aux = torch.stack(aux_groups).mean()
+        total = diffusion_loss + float(self.config.x0_huber_weight) * aux
+        if not torch.isfinite(total):
+            raise FloatingPointError("non-finite diffusion loss")
+        stats = {
+            "target_count": count,
+            "support_count": count,
+            "groups": group_support,
+            "diffusion_loss": float(diffusion_loss.detach().item()),
+            "x0_loss": float(aux.detach().item()),
+            "loss": float(total.detach().item()),
+            "finite": True,
+        }
+        return total, stats
 
     def _randn(self, shape: tuple[int, ...], *, device: torch.device, dtype: torch.dtype,
                generator: torch.Generator | None = None) -> Tensor:
