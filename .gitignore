@@ -13,5 +13,6 @@
 !/stirdiff/predict.py
 !/stirdiff/test.py
 !/stirdiff/metrics.py
+!/stirdiff/cross_validation.py
 !/stirdiff/imputer.py
 !/stirdiff/predictor.py
